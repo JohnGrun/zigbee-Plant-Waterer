@@ -1,0 +1,394 @@
+esphome:
+  name: zigbee-plant-waterer
+
+external_components:
+  - source: components
+    components: [zigbee]
+
+esp32:
+  board: esp32-h2-devkitm-1
+  #flash_size: 4MB
+  partitions: partitions_zb.csv
+  framework:
+    type: esp-idf
+    #sdkconfig_options:
+      #CONFIG_ESPTOOLPY_FLASHSIZE_4MB: y
+
+# Enable logging
+logger:
+  hardware_uart: UART0
+
+# wifi:
+#   ssid: "YourSSID"
+#   password: "YourPassword"
+#   ap:
+#     ssid: "FallbackAP"
+#     password: "fallbackpass123"
+
+# captive_portal:
+
+# api:
+
+# ota:
+
+# web_server:
+#   port: 80
+
+# time:
+# - platform: sntp
+#   id: sntp_time
+#   timezone: "UTC" # or your timezone
+#   servers:
+#    - 0.pool.ntp.org
+#    - 1.pool.ntp.org
+#    - 2.pool.ntp.org
+
+globals:
+  - id: color_x
+    type: float
+    restore_value: no
+    initial_value: '0'
+  - id: color_y
+    type: float
+    restore_value: no
+    initial_value: '0'
+  - id: number_of_channels
+    type: int
+    initial_value: '4'
+  - id: last_run
+    type: time_t[4]
+    initial_value: '{0, 0, 0, 0}'
+    restore_value: True # We want to preseve this incase of power outage. 
+  - id: durations
+    type: int[4]
+    initial_value: '{30, 30, 30, 30}'
+  - id: intervals
+    type: int[4]
+    initial_value: '{168, 168, 168, 168}' #Hours in a week
+
+time:
+  - platform: zigbee
+    id: zigbee_time
+    timezone: "UTC" # or your timezone
+    on_time_sync:
+      then:
+        - logger.log: "Synchronized system clock"
+    on_time:
+      # Every 1 hour
+      - seconds: 0
+        minutes: 0
+        hours: /1
+        then: 
+          - lambda: |-
+              auto time_now = id(zigbee_time).now().timestamp;
+              for (int channel_index = 0; channel_index++; channel_index < id(number_of_channels)) 
+              {
+                int time_diff = difftime(time_now, id(last_run)[channel_index]);
+                int interval_seconds = 60 * 60 * id(intervals)[channel_index];
+                if(time_diff >= interval_seconds)
+                {
+                  id(water_channel).execute(channel_index);
+                }
+              }
+
+script:
+  - id: water_channel
+    parameters:
+      ch: int
+    then:
+      - lambda: |-
+          auto now = id(zigbee_time).now().timestamp;
+          id(last_run)[ch] = now;
+      - if:
+          condition:
+            lambda: 'return ch == 0;'
+          then:
+            - switch.turn_on: ch0_valve
+            - delay: !lambda 'return id(durations)[0] * 1000;'
+            - switch.turn_off: ch0_valve
+
+      - if:
+          condition:
+            lambda: 'return ch == 1;'
+          then:
+            - switch.turn_on: ch1_valve
+            - delay: !lambda 'return id(durations)[1] * 1000;'
+            - switch.turn_off: ch1_valve
+
+      - if:
+          condition:
+            lambda: 'return ch == 2;'
+          then:
+            - switch.turn_on: ch2_valve
+            - delay: !lambda 'return id(durations)[2] * 1000;'
+            - switch.turn_off: ch2_valve
+
+      - if:
+          condition:
+            lambda: 'return ch == 3;'
+          then:
+            - switch.turn_on: ch3_valve
+            - delay: !lambda 'return id(durations)[3] * 1000;'
+            - switch.turn_off: ch3_valve
+      - delay: !lambda "return id(durations)[ch] * 1000;"
+
+sensor:
+  - platform: internal_temperature
+    name: "Internal Temperature"
+    id: "temp"
+    filters:
+      - delta: 0.1
+
+zigbee:
+  id: "zb"
+  endpoints:
+    - num: 1
+      device_type: COLOR_DIMMABLE_LIGHT
+      clusters:
+        - id: ON_OFF
+          attributes:
+            - attribute_id: 0
+              type: bool
+              on_value:
+                then:
+                  - light.control:
+                      id: light_1
+                      state: !lambda "return (bool)x;"
+        - id: LEVEL_CONTROL
+          attributes:
+            - attribute_id: 0
+              type: U8
+              value: 255
+              on_value:
+                then:
+                  - light.control:
+                      id: light_1
+                      brightness: !lambda "return ((float)x)/255;"
+        - id: COLOR_CONTROL
+          attributes:
+            - attribute_id: 3
+              type: U16
+              on_value:
+                then:
+                  - lambda: id(color_x) = (float)x/65536;
+                  - light.control:
+                      id: light_1
+                      red: !lambda "return zigbee::get_r_from_xy(id(color_x), id(color_y));"
+                      green: !lambda "return zigbee::get_g_from_xy(id(color_x), id(color_y));"
+                      blue: !lambda "return zigbee::get_b_from_xy(id(color_x), id(color_y));"
+            - attribute_id: 4
+              type: U16
+              on_value:
+                then:
+                  - lambda: id(color_y) = (float)x/65536;
+                  - light.control:
+                      id: light_1
+                      red: !lambda "return zigbee::get_r_from_xy(id(color_x), id(color_y));"
+                      green: !lambda "return zigbee::get_g_from_xy(id(color_x), id(color_y));"
+                      blue: !lambda "return zigbee::get_b_from_xy(id(color_x), id(color_y));"
+    - num: 2
+      device_type: TEMPERATURE_SENSOR
+      clusters:
+        - id: TEMP_MEASUREMENT
+          attributes:
+            - attribute_id: 0x0
+              type: S16
+              report: true
+              value: 100
+              device: temp
+              scale: 100
+    - num: 3
+      device_type: CUSTOM_ATTR
+      clusters:
+        - id: ON_OFF
+          attributes:
+            - attribute_id: 6
+              type: bool
+              on_value:
+                then:
+                  - script.execute: 
+                      id: water_channel
+                      ch: 0
+        - id: LEVEL_CONTROL
+          attributes:
+            - attribute_id: 7
+              type: U16
+              value: 0
+              on_value:
+                then:
+                  - lambda: id(durations)[0] = (int)x;
+        - id: LEVEL_CONTROL
+          attributes:
+            - attribute_id: 8
+              type: U16
+              value: 168
+              on_value:
+                then:
+                  - lambda: id(intervals)[0] = (int)x;
+        - id: TIME
+          attributes:
+            - attribute_id: 9
+              type: CHAR_STRING
+              report: true
+              value: id(last_run)[0]              
+    - num: 4
+      device_type: CUSTOM_ATTR
+      clusters:
+        - id: ON_OFF
+          attributes:
+            - attribute_id: 10
+              type: bool
+              on_value:
+                then:
+                - script.execute: 
+                    id: water_channel
+                    ch: 1
+                    
+        - id: LEVEL_CONTROL
+          attributes:
+            - attribute_id: 11
+              type: U16
+              value: 0
+              on_value:
+                then:
+                  - lambda: id(durations)[1] = (int)x;
+
+        - id: LEVEL_CONTROL
+          attributes:
+            - attribute_id: 12
+              type: U16
+              value: 168
+              on_value:
+                then:
+                  - lambda: id(intervals)[1] = (int)x;
+        - id: TIME
+          attributes:
+            - attribute_id: 13
+              type: CHAR_STRING
+              report: true
+              value: id(last_run)[1]  
+    - num: 5
+      device_type: CUSTOM_ATTR
+      clusters:
+        - id: ON_OFF
+          attributes:
+            - attribute_id: 14
+              type: bool
+              on_value:
+                then:
+                - script.execute: 
+                    id: water_channel
+                    ch: 2
+        - id: LEVEL_CONTROL
+          attributes:
+            - attribute_id: 15
+              type: U16
+              value: 0
+              on_value:
+                then:
+                  - lambda: id(durations)[2] = (int)x;
+        - id: LEVEL_CONTROL
+          attributes:
+            - attribute_id: 16
+              type: U16
+              value: 168
+              on_value:
+                then:
+                  - lambda: id(intervals)[2] = (int)x;
+        - id: TIME
+          attributes:
+            - attribute_id: 17
+              type: CHAR_STRING
+              report: true
+              value: id(last_run)[2]  
+
+    - num: 6
+      device_type: CUSTOM_ATTR
+      clusters:
+        - id: ON_OFF
+          attributes:
+            - attribute_id: 18
+              type: bool
+              on_value:
+                then:
+                - script.execute: 
+                    id: water_channel
+                    ch: 3
+        - id: LEVEL_CONTROL
+          attributes:
+            - attribute_id: 19
+              type: U16
+              value: 0
+              on_value:
+                then:
+                  - lambda: id(durations)[3] = (int)x;
+        - id: LEVEL_CONTROL
+          attributes:
+            - attribute_id: 20
+              type: U16
+              value: 168
+              on_value:
+                then:
+                  - lambda: id(intervals)[3] = (int)x;
+        - id: TIME
+          attributes:
+            - attribute_id: 21
+              type: CHAR_STRING
+              report: true
+              value: id(last_run)[3]  
+                      
+  on_join:
+    then:
+      - logger.log: "Joined network"
+
+light:
+  - platform: esp32_rmt_led_strip
+    rgb_order: GRB
+    pin: 8
+    num_leds: 1
+    #rmt_channel: 0
+    chipset: ws2812
+    id: light_1
+
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: 9
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    id: button_1
+    on_press:
+      then:
+        - zigbee.report: zb
+    on_click:
+      min_length: 5s
+      max_length: 20s
+      then:
+        - zigbee.reset: zb
+          
+switch:
+  - platform: gpio
+    pin: 10
+    id: ch0_valve
+    name: "Channel 0"
+    icon: "mdi:water"
+
+  - platform: gpio
+    pin: 11
+    id: ch1_valve
+    name: "Channel 1"
+    icon: "mdi:water"
+
+  - platform: gpio
+    pin: 12
+    id: ch2_valve
+    name: "Channel 2"
+    icon: "mdi:water"
+
+  - platform: gpio
+    pin: 22
+    id: ch3_valve
+    name: "Channel 3"
+    icon: "mdi:water"
